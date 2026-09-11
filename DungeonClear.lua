@@ -42,29 +42,6 @@ local function GetInstanceKey()
 end
 local UpdateFrameHeight, UpdateLayout
 local pauseBtn
-local spectateBtn
-local spectatePrevBtn, spectateNextBtn  -- seat cycling (< / >) on the same row
-local spectateAvailable        -- server allows the spectator camera? (SPECTATE msg)
-local ApplySpectateAvailability -- enable/disable the Spectate button to match
-local spectateResetBtn         -- ends the camera and hands control back to you
--- What the spectator camera is doing. The server never tells the addon, so this
--- is modelled from the commands we send -- the one source that is always there.
--- PLAYER_CONTROL_LOST/GAINED only correct it when this server happens to raise
--- them; they cannot be relied on, because a module that hands your character to
--- the bot AI can leave you unable to move without ever sending the client a
--- control update.
---
---   false     nothing running -- the camera is on your own character
---   "free"    free-flying camera
---   "follow"  riding a bot
---
--- The distinction earns its keep in the reset: a bare `spectate` toggles the
--- mode you are IN, so ending the follow cam takes two (the first only hands over
--- to the free camera) while the free camera ends on one. Knowing which we are in
--- is what makes one click enough without ever sending a toggle too many.
-local cameraState = false
-local UpdateResetBtnState      -- greys the reset button in/out with the state
-local SetCameraState           -- single place that moves cameraState
 local RefreshStatusHeight      -- re-measure the Warning row, then resize to fit
 local pullLabel          -- "Pull:" caption left of the segmented control
 local pullSegs = {}      -- [0]=Off [1]=On [2]=Dynamic segment buttons (full mode)
@@ -624,184 +601,6 @@ for i = 0, 2 do
     pullSegs[i] = seg
 end
 
--- Spectate toggle on its own row: detaches the player into a free-flying
--- camera while their character keeps running under bot AI (server-side
--- possession of an invisible dummy). Stateless label v1 — the server messages
--- confirm on/off. Independent of DC on/off, but the server can disable the
--- feature entirely (DungeonClear.SpectateEnable = 0): when it does, the SPECTATE
--- message flips spectateAvailable false and the button greys out (see
--- ApplySpectateAvailability). Assume available until the server says otherwise.
-spectateBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-spectateBtn:SetSize(100, 24)
--- The pull-row segments span -8..-32 below onBtn (24px buttons centered on
--- the label); start this row at -40 to keep the 8px row gap.
-spectateBtn:SetPoint("TOPLEFT", onBtn, "BOTTOMLEFT", 0, -40)
-spectateBtn:SetText("Наблюдение")
--- Left-click = the free-flying camera. Right-click (or shift-click) = follow
--- cam: the view rides the run's tank instead of flying free, which is what you
--- want when watching rather than exploring. Both are the same server toggle
--- family, so a second click of either ends the camera.
-spectateBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-spectateBtn:SetScript("OnClick", function(self, button)
-    if button == "RightButton" or IsShiftKeyDown() then
-        SendDcCommand("spectate", "follow")
-        SetCameraState("follow")
-    else
-        -- A bare toggle means different things from different seats: from no
-        -- camera it starts the free one, from the follow cam it hands over TO
-        -- the free one, and only from the free camera does it actually end.
-        SendDcCommand("spectate")
-        if cameraState == "free" then
-            SetCameraState(false)
-        else
-            SetCameraState("free")
-        end
-    end
-end)
-
--- Grey out and disable the Spectate button when the server has the feature
--- switched off, so the player can't click into a refusal. A disabled
--- UIPanelButtonTemplate is automatically dimmed and unclickable; the tooltip
--- explains why.
-spectateAvailable = true
-ApplySpectateAvailability = function()
-    if not spectateBtn then return end
-    -- The cycle buttons are the same feature; grey them out with it, or they
-    -- would click into the same refusal the Spectate button is greyed to avoid.
-    for _, b in ipairs({ spectateBtn, spectatePrevBtn, spectateNextBtn }) do
-        if b then
-            if spectateAvailable then b:Enable() else b:Disable() end
-        end
-    end
-    -- The reset has a second condition (is a camera even running?), so it goes
-    -- through its own rule rather than being flipped with the rest of the row.
-    if UpdateResetBtnState then UpdateResetBtnState() end
-end
-
-spectateBtn:SetScript("OnEnter", function(self)
-    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-    if not spectateAvailable then
-        GameTooltip:SetText("Режим наблюдения отключён", 1, 1, 1)
-        GameTooltip:AddLine("На этом сервере камера наблюдателя отключена.",
-            0.8, 0.8, 0.8, true)
-        GameTooltip:Show()
-        return
-    end
-    GameTooltip:SetText("Наблюдение", 1, 1, 1)
-    GameTooltip:AddLine("Левый клик: свободная камера.", 0.8, 0.8, 0.8, true)
-    GameTooltip:AddLine("Правый клик: камера за танком.",
-        0.8, 0.8, 0.8, true)
-    GameTooltip:Show()
-end)
-spectateBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
-
--- Seat cycling, on the same row as Spectate. The camera can sit on ANY bot in
--- the instance, not just the tank — watch the healer through a wipe, a DPS
--- through a burn — and clicking beats typing a randomised bot name. From no
--- camera at all these also start one (server side treats a cycle from cold as
--- "take the default seat"), so this row is a complete spectator control.
-spectatePrevBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-spectatePrevBtn:SetSize(30, 24)
-spectatePrevBtn:SetPoint("LEFT", spectateBtn, "RIGHT", 6, 0)
-spectatePrevBtn:SetText("|cffffd100<|r")
-spectatePrevBtn:SetScript("OnClick", function()
-    SendDcCommand("spectate", "prev")
-    SetCameraState("follow")  -- cycling from cold starts a follow cam too
-end)
-spectatePrevBtn:SetScript("OnEnter", function(self)
-    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-    GameTooltip:SetText("Предыдущий бот", 1, 1, 1)
-    GameTooltip:AddLine("Переместить камеру на предыдущего бота в инстансе.",
-        0.8, 0.8, 0.8, true)
-    GameTooltip:Show()
-end)
-spectatePrevBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
-
-spectateNextBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-spectateNextBtn:SetSize(30, 24)
-spectateNextBtn:SetPoint("LEFT", spectatePrevBtn, "RIGHT", 4, 0)
-spectateNextBtn:SetText("|cffffd100>|r")
-spectateNextBtn:SetScript("OnClick", function()
-    SendDcCommand("spectate", "next")
-    SetCameraState("follow")
-end)
-spectateNextBtn:SetScript("OnEnter", function(self)
-    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-    GameTooltip:SetText("Следующий бот", 1, 1, 1)
-    GameTooltip:AddLine("Следующий бот в инстансе. Запускает камеру слежения если не активна.",
-        0.8, 0.8, 0.8, true)
-    GameTooltip:Show()
-end)
-spectateNextBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
-
--- Way back: ends whatever camera is running and returns you to your own body.
--- It gets its own button because the exit was not discoverable -- nothing on
--- this row said how to get out, and while the camera rides a bot your character
--- does not answer to the keyboard, so being stuck there is the worst state the
--- panel can leave you in. Flush right on the spectate row, set apart from the
--- < > pair by a wider gap so it reads as the exit rather than a third seat
--- control.
-spectateResetBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-spectateResetBtn:SetSize(110, 24)
-spectateResetBtn:SetPoint("TOPRIGHT", pauseBtn, "BOTTOMRIGHT", 0, -40)
-spectateResetBtn:SetText("Сброс камеры")
-
--- Greyed out whenever no camera is running, so the button can only ever end one.
-UpdateResetBtnState = function()
-    if not spectateResetBtn then return end
-    if spectateAvailable ~= false and cameraState ~= false then
-        spectateResetBtn:Enable()
-    else
-        spectateResetBtn:Disable()
-    end
-end
-
-SetCameraState = function(state)
-    cameraState = state
-    UpdateResetBtnState()
-end
-
--- Apply the starting state now, or the button would sit there looking clickable
--- until something first moved the camera.
-UpdateResetBtnState()
-
--- Ending the follow cam takes two toggles, and they cannot go out back to back:
--- the first has to reach the server and hand the camera over before the second
--- means anything. So the reset sends one now and queues this one a second later.
-local secondToggle = CreateFrame("Frame")
-local secondElapsed = 0
-secondToggle:Hide()
-secondToggle:SetScript("OnUpdate", function(self, elap)
-    secondElapsed = secondElapsed + elap
-    if secondElapsed < 1.0 then return end
-    self:Hide()
-    SendDcCommand("spectate")
-end)
-
-spectateResetBtn:SetScript("OnClick", function()
-    -- The whole contract of this button: it always leaves the camera on your own
-    -- character, and never takes it away. With nothing running there is nothing
-    -- to end, and a toggle here would START a camera -- so it does nothing at
-    -- all. Same rule the greying-out uses, belt and braces.
-    if cameraState == false then return end
-
-    -- Only the follow cam needs the follow-up; from the free camera a second
-    -- toggle would switch a fresh camera back on.
-    local needsSecond = (cameraState == "follow")
-    SetCameraState(false)
-    SendDcCommand("spectate")
-    secondElapsed = 0
-    if needsSecond then secondToggle:Show() end
-end)
-
-spectateResetBtn:SetScript("OnEnter", function(self)
-    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-    GameTooltip:SetText("Сброс камеры", 1, 1, 1)
-    GameTooltip:AddLine("Завершает камеру наблюдателя и возвращает управление персонажем.",
-        0.8, 0.8, 0.8, true)
-    GameTooltip:Show()
-end)
-spectateResetBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
 -- Invisible click target over the tiny circle. Off -> start DC; running ->
 -- toggle pause/resume. Only shown in tiny mode (see UpdateLayout). Sits over
@@ -990,9 +789,8 @@ end
 
 -- Boss List Label
 local listLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
--- Below the pull + spectate rows: onBtn bottom, minus the 8px gap + 24px
--- segment row + 8px gap + 24px spectate row + 12px.
-listLabel:SetPoint("TOPLEFT", onBtn, "BOTTOMLEFT", 0, -76)
+-- Below the pull row: onBtn bottom, minus 8px gap + 24px segment row + 12px.
+listLabel:SetPoint("TOPLEFT", onBtn, "BOTTOMLEFT", 0, -50)
 listLabel:SetText("Боссы подземелья")
 listLabel:SetTextColor(0.24, 0.60, 1.0)
 
@@ -1328,10 +1126,10 @@ end
 
 -- The stack hanging off the action row's bottom, read from the anchors that
 -- actually place it rather than baked into the height constants:
---   76   onBtn bottom -> boss-list caption top (the pull row + the spectate row)
+--   50   onBtn bottom -> boss-list caption top (the pull row)
 --   +    the caption's own height
 --   4    caption -> list container, then the 205px container itself
-local LIST_GAP, LIST_PAD, LIST_H, TOGGLE_H = 76, 4, 205, 24
+local LIST_GAP, LIST_PAD, LIST_H, TOGGLE_H = 50, 4, 205, 24
 
 local function BelowActionRow()
     local capH = listLabel:GetHeight()
@@ -1376,10 +1174,6 @@ UpdateLayout = function()
         if pauseBtn then pauseBtn:Hide() end
         if pullLabel then pullLabel:Hide() end
         for i = 0, 2 do if pullSegs[i] then pullSegs[i]:Hide() end end
-        if spectateBtn then spectateBtn:Hide() end
-        if spectatePrevBtn then spectatePrevBtn:Hide() end
-        if spectateNextBtn then spectateNextBtn:Hide() end
-        if spectateResetBtn then spectateResetBtn:Hide() end
         listLabel:Hide()
         toggleBossesBtn:Hide()
         scrollContainer:Hide()
@@ -1409,10 +1203,6 @@ UpdateLayout = function()
         if pauseBtn then pauseBtn:Show() end
         if pullLabel then pullLabel:Show() end
         for i = 0, 2 do if pullSegs[i] then pullSegs[i]:Show() end end
-        if spectateBtn then spectateBtn:Show() end
-        if spectatePrevBtn then spectatePrevBtn:Show() end
-        if spectateNextBtn then spectateNextBtn:Show() end
-        if spectateResetBtn then spectateResetBtn:Show() end
         listLabel:Show()
         toggleBossesBtn:Show()
         statusFrame:Show()
@@ -1464,13 +1254,6 @@ eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
 eventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
 eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
--- Corrective only, for the camera state the addon models from its own commands:
--- the spectator camera takes control of our character away and hands it back, so
--- these let the "Reset Camera" button tell a camera that is still running from
--- one that has already been released (a typed `.dc spectate`, or the server
--- dropping it on its own). Not every server raises them -- see cameraState.
-eventFrame:RegisterEvent("PLAYER_CONTROL_LOST")
-eventFrame:RegisterEvent("PLAYER_CONTROL_GAINED")
 
 -- Request the boss list from the tank bot. The server's "dungeon bosses" value
 -- returns empty (and caches that for ~5s) whenever the bot isn't fully in the
@@ -1613,12 +1396,6 @@ local function OnAddonMessage(prefix, message, channel, sender)
         -- One player-facing setting's effective value + schema (key, value, min,
         -- max, type, overridden). Renders/refreshes its control in the panel.
         if HandleSettingsLine then HandleSettingsLine(parts) end
-    elseif parts[1] == "SPECTATE" then
-        -- Server tells us whether the spectator camera is enabled (DungeonClear.
-        -- SpectateEnable). Grey out / disable the button when it's off so a click
-        -- can't run into a refusal. Sent in answer to our status poll.
-        spectateAvailable = (parts[2] ~= "0")
-        if ApplySpectateAvailability then ApplySpectateAvailability() end
     elseif parts[1] == "SYNCEND" then
         if OnSettingsSyncBoundary then OnSettingsSyncBoundary("end") end
     elseif parts[1] == "CHAT" then
@@ -1719,16 +1496,6 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
         if frame:IsVisible() and isDCOn then
             SendDcCommand("status", "addon")
         end
-    elseif event == "PLAYER_CONTROL_LOST" then
-        -- Corrective only: catches a camera started outside this panel (a typed
-        -- `.dc spectate`). If we already track a mode, that one is more precise
-        -- than the guess this could make, so it is left alone.
-        if not cameraState then SetCameraState("free") end
-    elseif event == "PLAYER_CONTROL_GAINED" then
-        -- The camera let go for real. Cancel a queued second toggle -- it was
-        -- meant to finish the job, and now it would only start a new camera.
-        secondToggle:Hide()
-        SetCameraState(false)
     end
 end)
 
@@ -1796,13 +1563,6 @@ optCmdList:SetText(
     "|cff4db3ffДинамически|r: танк оценивает каждую группу мобов автоматически \226\128\148 |cffffa61aБыстро|r при малом " ..
     "числе мобов (врывается), иначе осторожная |cff4db3ffтяга в лагерь|r. Текущий выбор виден на кнопке. " ..
     "|cff8c8c8cВыкл|r: подходить и атаковать на месте.\n" ..
-    "|cffffd100Наблюдение|r  \226\128\148  Левый клик — свободная камера, персонаж продолжает идти под управлением бота. " ..
-    "Правый клик — камера за танком (следование), при гибели передаётся другому. " ..
-    "Кликнуть ещё раз (или |cffffd100.dc spectate|r) для возврата в своё тело.\n" ..
-    "|cffffd100< >|r (рядом с Наблюдением)  \226\128\148  Переключить камеру на любого бота в инстансе, " ..
-    "не только танка \226\128\148 хилер при вайпе, DPS при зачистке. Также запускает следование, если не активно. " ..
-    "|cffffd100.dc spectate next/prev/list|r или " ..
-    "|cffffd100.dc spectate follow <имя>|r для перехода сразу к конкретному боту.\n" ..
     "|cffffd100Вперёд|r (у строки босса)  \226\128\148  Отправить танка прямо к этому боссу (включит зачистку).\n" ..
     "|cffffd100Мини|r  \226\128\148  Свернуть окно в однострочную подвижную строку статуса.\n" ..
     "|cffffd100Настройки|r (вкладка)  \226\128\148  Переопределить серверные настройки (качество лута, % отдыха, " ..
